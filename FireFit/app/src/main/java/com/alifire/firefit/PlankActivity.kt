@@ -49,8 +49,8 @@ class PlankActivity : ComponentActivity() {
         )
     }
 
-    @Volatile private var startedAt = 0L
     @Volatile private var lastGood = 0L
+    @Volatile private var plankMillis = 0L
     @Volatile private var completed = false
     @Volatile private var detectorErrorShown = false
     @Volatile private var cameraStarted = false
@@ -241,14 +241,14 @@ class PlankActivity : ComponentActivity() {
     }
 
     private fun evaluate(pose: Pose) {
-        // Pick the visible side with the strongest landmark confidence, not simply LEFT first.
+        // A side-view plank only needs the main chain; knee confidence can vary with clothing/occlusion.
         val sides = listOf(
-            listOf(PoseLandmark.LEFT_SHOULDER, PoseLandmark.LEFT_ELBOW, PoseLandmark.LEFT_WRIST, PoseLandmark.LEFT_HIP, PoseLandmark.LEFT_KNEE, PoseLandmark.LEFT_ANKLE),
-            listOf(PoseLandmark.RIGHT_SHOULDER, PoseLandmark.RIGHT_ELBOW, PoseLandmark.RIGHT_WRIST, PoseLandmark.RIGHT_HIP, PoseLandmark.RIGHT_KNEE, PoseLandmark.RIGHT_ANKLE)
+            listOf(PoseLandmark.LEFT_SHOULDER, PoseLandmark.LEFT_ELBOW, PoseLandmark.LEFT_WRIST, PoseLandmark.LEFT_HIP, PoseLandmark.LEFT_ANKLE),
+            listOf(PoseLandmark.RIGHT_SHOULDER, PoseLandmark.RIGHT_ELBOW, PoseLandmark.RIGHT_WRIST, PoseLandmark.RIGHT_HIP, PoseLandmark.RIGHT_ANKLE)
         )
         val candidate = sides.mapNotNull { ids ->
             val points = ids.map { pose.getPoseLandmark(it) }
-            if (points.all { it != null && it.inFrameLikelihood >= .45f }) points.filterNotNull() else null
+            if (points.all { it != null && it.inFrameLikelihood >= .30f }) points.filterNotNull() else null
         }.maxByOrNull { points -> points.map { it.inFrameLikelihood }.average() }
 
         val now = System.currentTimeMillis()
@@ -257,28 +257,31 @@ class PlankActivity : ComponentActivity() {
             val elbow = candidate[1].position
             val wrist = candidate[2].position
             val hip = candidate[3].position
-            val knee = candidate[4].position
-            val ankle = candidate[5].position
+            val ankle = candidate[4].position
 
             val bodyDx = (ankle.x - shoulder.x).toDouble()
             val bodyDy = (ankle.y - shoulder.y).toDouble()
             val bodyLength = sqrt(bodyDx * bodyDx + bodyDy * bodyDy).coerceAtLeast(1.0)
             val bodyAngle = Math.toDegrees(atan2(abs(bodyDy), abs(bodyDx)))
             val hipDeviation = abs(bodyDx * (hip.y - shoulder.y) - bodyDy * (hip.x - shoulder.x)) / bodyLength
-            val kneeDeviation = abs(bodyDx * (knee.y - shoulder.y) - bodyDy * (knee.x - shoulder.x)) / bodyLength
             val elbowAngle = jointAngle(shoulder, elbow, wrist)
-            bodyAngle <= 28.0 &&
-                hipDeviation / bodyLength <= .22 &&
-                kneeDeviation / bodyLength <= .30 &&
-                elbowAngle in 55.0..145.0
+
+            // Wider tolerances account for camera perspective and natural body proportions.
+            bodyAngle <= 40.0 &&
+                hipDeviation / bodyLength <= .30 &&
+                elbowAngle in 45.0..160.0
         } else false
 
         if (valid) {
-            if (startedAt == 0L || now - lastGood > 1200L) startedAt = now
+            // Accumulate only time supported by valid pose frames. Brief detection dropouts pause,
+            // rather than erase, the user's effort. Cap each frame contribution to avoid time jumps.
+            if (lastGood > 0L) {
+                plankMillis += (now - lastGood).coerceIn(0L, 250L)
+            }
             lastGood = now
-            val seconds = ((now - startedAt) / 1000L).toInt().coerceAtMost(30)
+            val seconds = (plankMillis / 1000L).toInt().coerceAtMost(30)
             runOnUiThread {
-                label.text = "فرم پلانک قابل قبول است؛ ثابت بمان."
+                label.text = "فرم پلانک تأیید شد؛ ثابت بمان."
                 timer.text = String.format("%02d:%02d", seconds / 60, seconds % 60)
                 timer.setTextColor(gold)
             }
@@ -305,7 +308,8 @@ class PlankActivity : ComponentActivity() {
                 }
             }
         } else {
-            startedAt = 0L
+            // Reset the frame-to-frame clock only; preserve already-earned plank time.
+            lastGood = 0L
             runOnUiThread {
                 if (!completed) {
                     label.text = if (candidate == null) {
@@ -313,8 +317,7 @@ class PlankActivity : ComponentActivity() {
                     } else {
                         "فرم پلانک را صاف کن؛ شانه، لگن و مچ پا تقریباً در یک خط باشند."
                     }
-                    timer.text = "۰۰:۰۰"
-                    timer.setTextColor(muted)
+                    timer.setTextColor(if (plankMillis > 0L) gold else muted)
                 }
             }
         }
