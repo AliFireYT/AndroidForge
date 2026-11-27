@@ -2,11 +2,14 @@ package com.alifire.firefit
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.Paint
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
 import android.view.Gravity
+import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
 import android.widget.LinearLayout
@@ -28,10 +31,12 @@ import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import kotlin.math.abs
 import kotlin.math.atan2
+import kotlin.math.min
 import kotlin.math.sqrt
 
 class PlankActivity : ComponentActivity() {
     private lateinit var preview: PreviewView
+    private lateinit var overlay: PoseOverlayView
     private lateinit var label: TextView
     private lateinit var timer: TextView
     private lateinit var cameraStatus: TextView
@@ -47,10 +52,11 @@ class PlankActivity : ComponentActivity() {
     @Volatile private var startedAt = 0L
     @Volatile private var lastGood = 0L
     @Volatile private var completed = false
-    @Volatile private var cameraReady = false
     @Volatile private var detectorErrorShown = false
+    @Volatile private var cameraStarted = false
+    @Volatile private var useFrontCamera = true
     private var provider: ProcessCameraProvider? = null
-    private var cameraStarted = false
+    private var detectorCreated = false
 
     private val bg = Color.rgb(15, 10, 7)
     private val surface = Color.rgb(28, 18, 11)
@@ -63,6 +69,9 @@ class PlankActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         window.statusBarColor = bg
         window.navigationBarColor = bg
+        getSharedPreferences("firefit", MODE_PRIVATE).edit()
+            .putBoolean("challenge_active", true)
+            .apply()
         buildUi()
 
         if (ActivityCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
@@ -82,7 +91,7 @@ class PlankActivity : ComponentActivity() {
             letterSpacing = .12f
         }, LinearLayout.LayoutParams(-1, dp(28)))
         root.addView(makeText("پلانک را نگه دار", 24f, text, true), LinearLayout.LayoutParams(-1, dp(42)))
-        label = makeText("از پهلو روبه‌روی دوربین قرار بگیر؛ سر، لگن و مچ پا باید دیده شوند.", 14f, muted, false).apply {
+        label = makeText("از پهلو در کادر قرار بگیر؛ سر تا مچ پا دیده شود.", 14f, muted, false).apply {
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(2), 0, dp(2), dp(8))
         }
@@ -103,15 +112,18 @@ class PlankActivity : ComponentActivity() {
         }
         preview = PreviewView(this).apply {
             implementationMode = PreviewView.ImplementationMode.COMPATIBLE
-            scaleType = PreviewView.ScaleType.FILL_CENTER
+            // FIT_CENTER keeps the pose overlay in the same coordinate space as the camera frame.
+            scaleType = PreviewView.ScaleType.FIT_CENTER
         }
+        overlay = PoseOverlayView(this)
         frame.addView(preview, FrameLayout.LayoutParams(-1, -1))
+        frame.addView(overlay, FrameLayout.LayoutParams(-1, -1))
         root.addView(frame, LinearLayout.LayoutParams(-1, 0, 1f).apply {
             topMargin = dp(8)
             bottomMargin = dp(12)
         })
 
-        val hint = makeText("بدن باید تقریباً صاف باشد. اگر فرم به‌هم بخورد، شمارش از صفر شروع می‌شود.", 13f, muted, false).apply {
+        val hint = makeText("اسکلت بدن با نقطه و خط نمایش داده می‌شود. برای پلانک، از پهلو و تمام‌قد دیده شو.", 13f, muted, false).apply {
             gravity = Gravity.CENTER
             setPadding(dp(12), dp(8), dp(12), dp(8))
             background = rounded(surface, 12, Color.rgb(65, 40, 24), 1)
@@ -123,7 +135,13 @@ class PlankActivity : ComponentActivity() {
             minHeight = dp(56)
             isClickable = true
             isFocusable = true
-            setOnClickListener { finish() }
+            setOnClickListener {
+                getSharedPreferences("firefit", MODE_PRIVATE).edit()
+                    .remove("pending_package")
+                    .putBoolean("challenge_active", false)
+                    .apply()
+                finish()
+            }
         }
         root.addView(cancel, LinearLayout.LayoutParams(-1, dp(58)).apply { topMargin = dp(12) })
         setContentView(root)
@@ -161,6 +179,7 @@ class PlankActivity : ComponentActivity() {
                         return@addListener
                     }
                 }
+                useFrontCamera = selector == CameraSelector.DEFAULT_FRONT_CAMERA
 
                 val previewUseCase = Preview.Builder().build().also {
                     it.setSurfaceProvider(preview.surfaceProvider)
@@ -175,16 +194,21 @@ class PlankActivity : ComponentActivity() {
                         proxy.close()
                         return@setAnalyzer
                     }
+                    val rotation = proxy.imageInfo.rotationDegrees
+                    val frameWidth = if (rotation == 90 || rotation == 270) proxy.height else proxy.width
+                    val frameHeight = if (rotation == 90 || rotation == 270) proxy.width else proxy.height
                     try {
-                        val input = InputImage.fromMediaImage(media, proxy.imageInfo.rotationDegrees)
+                        val input = InputImage.fromMediaImage(media, rotation)
+                        detectorCreated = true
                         detector.process(input)
-                            .addOnSuccessListener { pose -> evaluate(pose) }
+                            .addOnSuccessListener { pose ->
+                                overlay.updatePose(pose, frameWidth, frameHeight, useFrontCamera)
+                                evaluate(pose)
+                            }
                             .addOnFailureListener {
                                 if (!detectorErrorShown) {
                                     detectorErrorShown = true
-                                    runOnUiThread {
-                                        label.text = "تعذر تحليل الصورة؛ دوربین را دوباره باز کن."
-                                    }
+                                    runOnUiThread { label.text = "تحلیل تصویر ناموفق بود؛ نور و فاصله را بررسی کن." }
                                 }
                             }
                             .addOnCompleteListener { proxy.close() }
@@ -195,9 +219,8 @@ class PlankActivity : ComponentActivity() {
 
                 cameraProvider.unbindAll()
                 cameraProvider.bindToLifecycle(this, selector, previewUseCase, analysis)
-                cameraReady = true
                 runOnUiThread {
-                    cameraStatus.text = if (selector == CameraSelector.DEFAULT_FRONT_CAMERA) "دوربین جلو متصل شد" else "دوربین پشت متصل شد"
+                    cameraStatus.text = if (useFrontCamera) "دوربین جلو متصل شد · رهگیری فعال" else "دوربین پشت متصل شد · رهگیری فعال"
                     cameraStatus.setTextColor(gold)
                     label.text = "از پهلو در کادر قرار بگیر؛ کل بدن باید دیده شود."
                 }
@@ -211,7 +234,6 @@ class PlankActivity : ComponentActivity() {
 
     private fun showCameraError(message: String) {
         runOnUiThread {
-            cameraReady = false
             cameraStatus.text = "دوربین در دسترس نیست"
             cameraStatus.setTextColor(ember)
             label.text = message
@@ -219,33 +241,36 @@ class PlankActivity : ComponentActivity() {
     }
 
     private fun evaluate(pose: Pose) {
-        val leftShoulder = pose.getPoseLandmark(PoseLandmark.LEFT_SHOULDER)
-        val leftHip = pose.getPoseLandmark(PoseLandmark.LEFT_HIP)
-        val leftAnkle = pose.getPoseLandmark(PoseLandmark.LEFT_ANKLE)
-        val rightShoulder = pose.getPoseLandmark(PoseLandmark.RIGHT_SHOULDER)
-        val rightHip = pose.getPoseLandmark(PoseLandmark.RIGHT_HIP)
-        val rightAnkle = pose.getPoseLandmark(PoseLandmark.RIGHT_ANKLE)
-
-        val side = if (leftShoulder != null && leftHip != null && leftAnkle != null) {
-            Triple(leftShoulder, leftHip, leftAnkle)
-        } else if (rightShoulder != null && rightHip != null && rightAnkle != null) {
-            Triple(rightShoulder, rightHip, rightAnkle)
-        } else null
+        // Pick the visible side with the strongest landmark confidence, not simply LEFT first.
+        val sides = listOf(
+            listOf(PoseLandmark.LEFT_SHOULDER, PoseLandmark.LEFT_ELBOW, PoseLandmark.LEFT_WRIST, PoseLandmark.LEFT_HIP, PoseLandmark.LEFT_KNEE, PoseLandmark.LEFT_ANKLE),
+            listOf(PoseLandmark.RIGHT_SHOULDER, PoseLandmark.RIGHT_ELBOW, PoseLandmark.RIGHT_WRIST, PoseLandmark.RIGHT_HIP, PoseLandmark.RIGHT_KNEE, PoseLandmark.RIGHT_ANKLE)
+        )
+        val candidate = sides.mapNotNull { ids ->
+            val points = ids.map { pose.getPoseLandmark(it) }
+            if (points.all { it != null && it.inFrameLikelihood >= .45f }) points.filterNotNull() else null
+        }.maxByOrNull { points -> points.map { it.inFrameLikelihood }.average() }
 
         val now = System.currentTimeMillis()
-        val valid = if (side != null &&
-            side.first.inFrameLikelihood > .55f &&
-            side.second.inFrameLikelihood > .55f &&
-            side.third.inFrameLikelihood > .55f) {
-            val shoulder = side.first.position
-            val hip = side.second.position
-            val ankle = side.third.position
-            val dx = (ankle.x - shoulder.x).toDouble()
-            val dy = (ankle.y - shoulder.y).toDouble()
-            val length = sqrt(dx * dx + dy * dy).coerceAtLeast(1.0)
-            val bodyAngle = Math.toDegrees(atan2(abs(dy), abs(dx)))
-            val hipOffset = abs(dx * (hip.y - shoulder.y) - dy * (hip.x - shoulder.x)) / length
-            bodyAngle < 25.0 && hipOffset / length < .23
+        val valid = if (candidate != null) {
+            val shoulder = candidate[0].position
+            val elbow = candidate[1].position
+            val wrist = candidate[2].position
+            val hip = candidate[3].position
+            val knee = candidate[4].position
+            val ankle = candidate[5].position
+
+            val bodyDx = (ankle.x - shoulder.x).toDouble()
+            val bodyDy = (ankle.y - shoulder.y).toDouble()
+            val bodyLength = sqrt(bodyDx * bodyDx + bodyDy * bodyDy).coerceAtLeast(1.0)
+            val bodyAngle = Math.toDegrees(atan2(abs(bodyDy), abs(bodyDx)))
+            val hipDeviation = abs(bodyDx * (hip.y - shoulder.y) - bodyDy * (hip.x - shoulder.x)) / bodyLength
+            val kneeDeviation = abs(bodyDx * (knee.y - shoulder.y) - bodyDy * (knee.x - shoulder.x)) / bodyLength
+            val elbowAngle = jointAngle(shoulder, elbow, wrist)
+            bodyAngle <= 28.0 &&
+                hipDeviation / bodyLength <= .22 &&
+                kneeDeviation / bodyLength <= .30 &&
+                elbowAngle in 55.0..145.0
         } else false
 
         if (valid) {
@@ -253,7 +278,7 @@ class PlankActivity : ComponentActivity() {
             lastGood = now
             val seconds = ((now - startedAt) / 1000L).toInt().coerceAtMost(30)
             runOnUiThread {
-                label.text = "فرم مناسبه؛ ثابت بمون."
+                label.text = "فرم پلانک قابل قبول است؛ ثابت بمان."
                 timer.text = String.format("%02d:%02d", seconds / 60, seconds % 60)
                 timer.setTextColor(gold)
             }
@@ -261,7 +286,7 @@ class PlankActivity : ComponentActivity() {
                 completed = true
                 val prefs = getSharedPreferences("firefit", MODE_PRIVATE)
                 prefs.edit().putLong("until", now + 10 * 60 * 1000L).apply()
-                val pending = prefs.getString("pending_package", null)
+                val pending = prefs.getString("pending_package", intent.getStringExtra("blocked_package"))
                 runOnUiThread {
                     label.text = "تمرین کامل شد؛ ۱۰ دقیقه دسترسی گرفتی."
                     cameraStatus.text = "چالش با موفقیت انجام شد"
@@ -270,8 +295,11 @@ class PlankActivity : ComponentActivity() {
                     preview.postDelayed({
                         if (!pending.isNullOrBlank()) {
                             packageManager.getLaunchIntentForPackage(pending)?.let { startActivity(it) }
-                            prefs.edit().remove("pending_package").apply()
                         }
+                        prefs.edit()
+                            .remove("pending_package")
+                            .putBoolean("challenge_active", false)
+                            .apply()
                         finish()
                     }, 1400)
                 }
@@ -280,7 +308,11 @@ class PlankActivity : ComponentActivity() {
             startedAt = 0L
             runOnUiThread {
                 if (!completed) {
-                    label.text = if (side == null) "بدن کامل دیده نمی‌شود؛ کمی از دوربین فاصله بگیر." else "بدن را صاف نگه دار و کل بدن را داخل کادر بگذار."
+                    label.text = if (candidate == null) {
+                        "بدن کامل پیدا نشد؛ از پهلو و با نور کافی در کادر قرار بگیر."
+                    } else {
+                        "فرم پلانک را صاف کن؛ شانه، لگن و مچ پا تقریباً در یک خط باشند."
+                    }
                     timer.text = "۰۰:۰۰"
                     timer.setTextColor(muted)
                 }
@@ -288,10 +320,23 @@ class PlankActivity : ComponentActivity() {
         }
     }
 
+    private fun jointAngle(a: android.graphics.PointF, b: android.graphics.PointF, c: android.graphics.PointF): Double {
+        val abx = (a.x - b.x).toDouble()
+        val aby = (a.y - b.y).toDouble()
+        val cbx = (c.x - b.x).toDouble()
+        val cby = (c.y - b.y).toDouble()
+        val dot = abx * cbx + aby * cby
+        val lengths = (sqrt(abx * abx + aby * aby) * sqrt(cbx * cbx + cby * cby)).coerceAtLeast(1.0)
+        return Math.toDegrees(kotlin.math.acos((dot / lengths).coerceIn(-1.0, 1.0)))
+    }
+
     override fun onDestroy() {
         provider?.unbindAll()
         executor.shutdown()
-        if (::preview.isInitialized) detector.close()
+        if (detectorCreated) detector.close()
+        getSharedPreferences("firefit", MODE_PRIVATE).edit()
+            .putBoolean("challenge_active", false)
+            .apply()
         super.onDestroy()
     }
 
@@ -311,4 +356,77 @@ class PlankActivity : ComponentActivity() {
         }
 
     private fun dp(value: Int) = (value * resources.displayMetrics.density).toInt()
+}
+
+private class PoseOverlayView(context: android.content.Context) : View(context) {
+    private val linePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.rgb(0, 225, 210)
+        strokeWidth = 6f
+        style = Paint.Style.STROKE
+        strokeCap = Paint.Cap.ROUND
+    }
+    private val jointPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.rgb(255, 165, 35)
+        style = Paint.Style.FILL
+    }
+    private val outlinePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.WHITE
+        strokeWidth = 2f
+        style = Paint.Style.STROKE
+    }
+
+    @Volatile private var pose: Pose? = null
+    @Volatile private var imageWidth = 1
+    @Volatile private var imageHeight = 1
+    @Volatile private var mirrored = false
+
+    fun updatePose(value: Pose, width: Int, height: Int, mirror: Boolean) {
+        pose = value
+        imageWidth = width.coerceAtLeast(1)
+        imageHeight = height.coerceAtLeast(1)
+        mirrored = mirror
+        postInvalidate()
+    }
+
+    override fun onDraw(canvas: Canvas) {
+        super.onDraw(canvas)
+        val current = pose ?: return
+        val scale = min(width.toFloat() / imageWidth, height.toFloat() / imageHeight)
+        val offsetX = (width - imageWidth * scale) / 2f
+        val offsetY = (height - imageHeight * scale) / 2f
+
+        fun point(type: Int): android.graphics.PointF? {
+            val landmark = current.getPoseLandmark(type) ?: return null
+            if (landmark.inFrameLikelihood < .30f) return null
+            val x = if (mirrored) imageWidth - landmark.position.x else landmark.position.x
+            return android.graphics.PointF(offsetX + x * scale, offsetY + landmark.position.y * scale)
+        }
+
+        val bones = arrayOf(
+            intArrayOf(PoseLandmark.LEFT_SHOULDER, PoseLandmark.RIGHT_SHOULDER),
+            intArrayOf(PoseLandmark.LEFT_HIP, PoseLandmark.RIGHT_HIP),
+            intArrayOf(PoseLandmark.LEFT_SHOULDER, PoseLandmark.LEFT_ELBOW),
+            intArrayOf(PoseLandmark.LEFT_ELBOW, PoseLandmark.LEFT_WRIST),
+            intArrayOf(PoseLandmark.RIGHT_SHOULDER, PoseLandmark.RIGHT_ELBOW),
+            intArrayOf(PoseLandmark.RIGHT_ELBOW, PoseLandmark.RIGHT_WRIST),
+            intArrayOf(PoseLandmark.LEFT_SHOULDER, PoseLandmark.LEFT_HIP),
+            intArrayOf(PoseLandmark.RIGHT_SHOULDER, PoseLandmark.RIGHT_HIP),
+            intArrayOf(PoseLandmark.LEFT_HIP, PoseLandmark.LEFT_KNEE),
+            intArrayOf(PoseLandmark.LEFT_KNEE, PoseLandmark.LEFT_ANKLE),
+            intArrayOf(PoseLandmark.RIGHT_HIP, PoseLandmark.RIGHT_KNEE),
+            intArrayOf(PoseLandmark.RIGHT_KNEE, PoseLandmark.RIGHT_ANKLE)
+        )
+        bones.forEach { pair ->
+            val a = point(pair[0])
+            val b = point(pair[1])
+            if (a != null && b != null) canvas.drawLine(a.x, a.y, b.x, b.y, linePaint)
+        }
+        current.allPoseLandmarks.forEach { landmark ->
+            if (landmark.inFrameLikelihood >= .30f) {
+                val p = point(landmark.landmarkType) ?: return@forEach
+                canvas.drawCircle(p.x, p.y, 7f, outlinePaint)
+                canvas.drawCircle(p.x, p.y, 4.5f, jointPaint)
+            }
+        }
+    }
 }
