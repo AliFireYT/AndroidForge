@@ -138,7 +138,7 @@ class MainActivity : Activity() {
             val cb = CheckBox(this).apply {
                 text = packageManager.getApplicationLabel(app).toString()
                 textSize = 15f
-                setTextColor(text)
+                setTextColor(this@MainActivity.text)
                 buttonTintList = android.content.res.ColorStateList.valueOf(ember)
                 isChecked = selected.contains(app.packageName)
                 minHeight = dp(54)
@@ -203,7 +203,7 @@ class MainActivity : Activity() {
             text = label
             textSize = 15f
             typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
-            setTextColor(if (primary) Color.rgb(25, 12, 5) else text)
+            setTextColor(if (primary) Color.rgb(25, 12, 5) else this@MainActivity.text)
             gravity = Gravity.CENTER
             minHeight = dp(60)
             setPadding(dp(16), dp(14), dp(16), dp(14))
