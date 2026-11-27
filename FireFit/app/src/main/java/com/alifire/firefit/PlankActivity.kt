@@ -15,6 +15,7 @@ import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.LifecycleOwner
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.pose.Pose
 import com.google.mlkit.vision.pose.PoseDetection
@@ -41,7 +42,7 @@ class PlankActivity : Activity() {
         super.onCreate(savedInstanceState)
         val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(Color.rgb(10, 14, 24)) }
         label = TextView(this).apply {
-            text = "از横 پهلو در کادر دوربین قرار بگیر؛ کل بدن باید دیده شود."
+            text = "از پهلو در کادر دوربین قرار بگیر؛ کل بدن باید دیده شود."
             setTextColor(Color.WHITE); textSize = 17f; gravity = Gravity.CENTER; setPadding(12, 14, 12, 10)
         }
         timer = TextView(this).apply {
@@ -55,6 +56,14 @@ class PlankActivity : Activity() {
         if (ActivityCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
             ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.CAMERA), 1)
         } else startCamera()
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == 1 && grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) startCamera()
+        else if (requestCode == 1) {
+            label.text = "برای تشخیص حرکت باید اجازهٔ دوربین را فعال کنی."
+        }
     }
 
     private fun startCamera() {
@@ -73,7 +82,7 @@ class PlankActivity : Activity() {
             }
             try {
                 provider.unbindAll()
-                provider.bindToLifecycle(this, CameraSelector.DEFAULT_FRONT_CAMERA, previewUseCase, analysis)
+                provider.bindToLifecycle(this as LifecycleOwner, CameraSelector.DEFAULT_FRONT_CAMERA, previewUseCase, analysis)
             } catch (_: Exception) { runOnUiThread { label.text = "دوربین جلو در دسترس نیست." } }
         }, ContextCompat.getMainExecutor(this))
     }
@@ -121,7 +130,7 @@ class PlankActivity : Activity() {
         } else {
             startedAt = 0L
             runOnUiThread {
-                if (!completed) { label.text = "بدن را از横 پهلو صاف نگه دار و کل بدن را در کادر بگذار."; timer.text = "۰۰:۰۰ / ۰۰:۳۰" }
+                if (!completed) { label.text = "بدن را از پهلو صاف نگه دار و کل بدن را در کادر بگذار."; timer.text = "۰۰:۰۰ / ۰۰:۳۰" }
             }
         }
     }
